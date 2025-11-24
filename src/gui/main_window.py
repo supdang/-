@@ -1261,11 +1261,11 @@ class MainWindow(QMainWindow):
         about_text = f"""
         <h2>{GUIConfig.WINDOW_TITLE}</h2>
         <p><b>版本:</b> 1.0.0</p>
-        <p><b>作者:</b> 张述瑞</p>
-        <p><b>学号:</b> 221171020211</p>
-        <p><b>专业:</b> 2022级数据科学与大数据技术02班</p>
-        <p><b>指导教师:</b> 田晓艺</p>
-        <p><b>学校:</b> 齐鲁理工学院</p>
+        <p><b>作者:</b> xxx</p>
+        <p><b>学号:</b> xxxxx</p>
+        <p><b>专业:</b> xxxxxxxx</p>
+        <p><b>指导教师:</b> xxx</p>
+        <p><b>学校:</b> xxxx</p>
         <hr>
         <p>本系统基于深度学习技术，实现机床刀具生命周期磨损状态的智能识别与诊断。</p>
         """
