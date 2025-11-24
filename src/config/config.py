@@ -122,7 +122,7 @@ class SystemConfig:
     # 系统信息
     APP_NAME = "ToolWearDiagnosis"
     VERSION = "1.0.0"
-    AUTHOR = "张述瑞"
+    AUTHOR = "xxx"
     
     # 性能配置
     MAX_WORKERS = 4     # 最大工作线程数
