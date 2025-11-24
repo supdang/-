@@ -165,7 +165,17 @@ class ToolWearClassifier:
             model: LSTM模型实例
             device: 计算设备 ('cpu' 或 'cuda')
         """
-        self.device = torch.device(device if device else ('cuda' if torch.cuda.is_available() else 'cpu'))
+        # 根据用户选择或可用性设置设备
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            # 如果用户选择了cuda但不可用，则回退到cpu
+            if device == 'cuda' and not torch.cuda.is_available():
+                logger.warning("CUDA不可用，回退到CPU")
+                self.device = torch.device('cpu')
+            else:
+                self.device = torch.device(device)
+        
         logger.info(f"使用设备: {self.device}")
 
         # 初始化模型

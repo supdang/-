@@ -133,6 +133,9 @@ class TrainingWorker(QThread):
         total_correct = 0
         total_samples = 0
 
+        # 获取loader的总长度
+        total_batches = len(train_loader)
+
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(self.classifier.device), target.to(self.classifier.device)
 
@@ -150,6 +153,15 @@ class TrainingWorker(QThread):
             # 每个batch后清理缓存（GPU专用）
             if batch_idx % 4 == 0 and 'cuda' in str(self.classifier.device):
                 torch.cuda.empty_cache()
+
+            # 对于CPU训练，每10个batch发送一次更详细的进度更新
+            if 'cuda' not in str(self.classifier.device) and batch_idx % 10 == 0:
+                current_avg_loss = total_loss / (batch_idx + 1)
+                current_avg_acc = total_correct / total_samples
+                # 发送中间进度信号，使用负数epoch值表示中间状态，同时传递总batch数
+                self.progress_updated.emit(
+                    -(batch_idx + 1 + total_batches * 1000), current_avg_loss, current_avg_acc, float(total_batches), 0.0
+                )  # 使用val_loss参数来传递总batch数
 
         avg_loss = total_loss / len(train_loader)
         avg_acc = total_correct / total_samples
@@ -440,6 +452,12 @@ class MainWindow(QMainWindow):
         # 训练进度
         self.progress_bar = QProgressBar()
         layout.addWidget(self.progress_bar)
+
+        # CPU训练详细进度条
+        self.cpu_progress_bar = QProgressBar()
+        self.cpu_progress_bar.setFormat("CPU训练批次进度: %p%")
+        self.cpu_progress_bar.setVisible(False)  # 默认隐藏，仅在CPU训练时显示
+        layout.addWidget(self.cpu_progress_bar)
 
         return group
 
@@ -928,6 +946,32 @@ class MainWindow(QMainWindow):
     def update_training_progress(self, epoch, train_loss, train_acc, val_loss, val_acc):
         """更新训练进度"""
         try:
+            # 检查是否是CPU训练的中间进度更新（epoch为负数）
+            if epoch < 0:
+                # CPU训练的中间进度更新，从负数中解析batch信息
+                # 格式：-(batch_num + total_batches * 1000)
+                total_batches = int(val_loss)  # 从val_loss参数中获取总batch数
+                raw_value = abs(epoch)
+                batch_num = raw_value % 1000  # 提取batch编号
+                
+                # 显示CPU进度条
+                self.cpu_progress_bar.setVisible(True)
+                
+                # 计算准确的进度百分比
+                if total_batches > 0:
+                    estimated_progress = int((batch_num / total_batches) * 100)
+                    self.cpu_progress_bar.setValue(estimated_progress)
+                else:
+                    # 如果无法获取总batch数，使用之前的估算
+                    estimated_progress = min(int((batch_num / 100) * 100), 100)
+                    self.cpu_progress_bar.setValue(estimated_progress)
+                
+                self.status_bar.showMessage(f"CPU训练中... 批次 {batch_num}/{total_batches}, 训练损失: {train_loss:.4f}, 训练准确率: {train_acc:.4f}")
+                return
+
+            # 隐藏CPU进度条，显示主进度条
+            self.cpu_progress_bar.setVisible(False)
+            
             # 更新进度条
             progress = (epoch / self.epochs_spin.value()) * 100
             self.progress_bar.setValue(int(progress))
