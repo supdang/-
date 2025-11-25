@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CPU训练脚本
-用于在CPU上训练刀具磨损状态识别模型
+GPU训练脚本
+用于在GPU上训练刀具磨损状态识别模型，支持断点保存和恢复功能
 """
 
 import sys
@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
+import argparse
 
 # 添加src目录到Python路径
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -25,16 +26,37 @@ from src.utils.logger import setup_logger
 def main():
     """主训练函数"""
     print("=" * 60)
-    print("刀具磨损状态识别模型 - CPU训练")
+    print("刀具磨损状态识别模型 - GPU训练（支持断点）")
     print("=" * 60)
+    
+    # 设置命令行参数
+    parser = argparse.ArgumentParser(description='GPU训练脚本（支持断点）')
+    parser.add_argument('--checkpoint-path', type=str, 
+                       default='checkpoints/gpu_training_checkpoint.pth',
+                       help='断点文件路径')
+    parser.add_argument('--resume', action='store_true',
+                       help='从断点恢复训练')
+    parser.add_argument('--epochs', type=int, default=ModelConfig.NUM_EPOCHS,
+                       help='训练轮数')
+    parser.add_argument('--batch-size', type=int, default=ModelConfig.BATCH_SIZE,
+                       help='批量大小')
+    parser.add_argument('--lr', type=float, default=ModelConfig.LEARNING_RATE,
+                       help='学习率')
+    
+    args = parser.parse_args()
     
     # 设置日志
     logger = setup_logger(log_level="INFO")
-    logger.info("开始CPU训练流程")
+    logger.info("开始GPU训练流程（支持断点）")
     
-    # 确保使用CPU
-    device = torch.device('cpu')
-    logger.info(f"强制使用设备: {device}")
+    # 检查CUDA可用性
+    if not torch.cuda.is_available():
+        logger.error("CUDA不可用，请检查GPU和CUDA配置")
+        print("错误: CUDA不可用，无法进行GPU训练")
+        return 1
+    
+    device = 'cuda'
+    logger.info(f"使用设备: {device}")
     
     try:
         # 1. 加载数据
@@ -50,14 +72,6 @@ def main():
         # 2. 数据预处理
         print("\n2. 数据预处理...")
         preprocessor = SignalPreprocessor()
-        
-        # 转置数据以匹配预期格式 (samples, channels, time_steps) -> (channels, samples)
-        if sensor_data.shape[0] > sensor_data.shape[1]:  # 检查是否需要转置
-            print(f"   原始数据形状: {sensor_data.shape}")
-            # 确保数据格式为 (channels, samples)
-            if sensor_data.shape[1] > sensor_data.shape[0]:
-                sensor_data = sensor_data.T  # 转置为 (samples, channels)
-                sensor_data = sensor_data.T  # 再次转置保持 (channels, samples)
         
         # 应用预处理流水线
         processed_data, processed_labels = preprocessor.preprocess_pipeline(
@@ -104,36 +118,42 @@ def main():
         
         # 4. 创建模型
         print("\n4. 创建LSTM模型...")
-        classifier = ToolWearClassifier(device='cpu')  # 强制使用CPU
-        print("   模型创建成功")
+        classifier = ToolWearClassifier(device=device)
+        print(f"   模型创建成功，使用设备: {classifier.device}")
         
-        # 5. 训练模型
+        # 5. 确保断点目录存在
+        checkpoint_dir = Path(args.checkpoint_path).parent
+        checkpoint_dir.mkdir(exist_ok=True)
+        
+        # 6. 训练模型
         print("\n5. 开始训练...")
         print(f"   使用设备: {classifier.device}")
-        print(f"   训练轮数: {ModelConfig.NUM_EPOCHS}")
-        print(f"   批量大小: {ModelConfig.BATCH_SIZE}")
-        print(f"   学习率: {ModelConfig.LEARNING_RATE}")
+        print(f"   训练轮数: {args.epochs}")
+        print(f"   批量大小: {args.batch_size}")
+        print(f"   学习率: {args.lr}")
+        print(f"   断点路径: {args.checkpoint_path}")
+        print(f"   从断点恢复: {args.resume}")
         
         # 训练模型
         history = classifier.train(
             train_data=(X_train, y_train),
             val_data=(X_val, y_val),
-            batch_size=ModelConfig.BATCH_SIZE,
-            num_epochs=ModelConfig.NUM_EPOCHS,
-            learning_rate=ModelConfig.LEARNING_RATE,
+            batch_size=args.batch_size,
+            num_epochs=args.epochs,
+            learning_rate=args.lr,
             patience=ModelConfig.PATIENCE,
-            checkpoint_path='checkpoints/cpu_training_checkpoint.pth',
-            resume_from_checkpoint=False  # 可以通过命令行参数控制
+            checkpoint_path=args.checkpoint_path,
+            resume_from_checkpoint=args.resume
         )
         
         print(f"\n   训练完成！最佳验证准确率: {classifier.best_val_acc:.4f}")
         
-        # 6. 评估模型
+        # 7. 评估模型
         print("\n6. 评估模型...")
         test_results = classifier.evaluate((X_test, y_test))
         print(f"   测试准确率: {test_results['accuracy']:.4f}")
         
-        # 7. 保存模型
+        # 8. 保存模型
         print("\n7. 保存模型...")
         model_dir = Path(__file__).parent / 'models'
         model_dir.mkdir(exist_ok=True)
@@ -142,20 +162,20 @@ def main():
         classifier.save_model(str(model_path))
         print(f"   模型已保存到: {model_path}")
         
-        # 8. 保存最佳模型
+        # 9. 保存最佳模型
         best_model_path = model_dir / ModelConfig.BEST_MODEL_NAME
         classifier.save_model(str(best_model_path))
         print(f"   最佳模型已保存到: {best_model_path}")
         
-        # 9. 绘制训练历史
+        # 10. 绘制训练历史
         print("\n8. 绘制训练历史...")
         plot_dir = Path(__file__).parent / 'plots'
         plot_dir.mkdir(exist_ok=True)
         
-        classifier.plot_training_history(save_path=plot_dir / 'training_history.png')
+        classifier.plot_training_history(save_path=plot_dir / 'training_history_gpu.png')
         
         print("\n" + "=" * 60)
-        print("CPU训练完成！")
+        print("GPU训练完成！")
         print(f"模型已保存到: {model_dir}")
         print(f"图表已保存到: {plot_dir}")
         print("=" * 60)
@@ -169,14 +189,39 @@ def main():
 
 
 def quick_train():
-    """快速训练模式（用于测试）"""
+    """快速GPU训练模式（用于测试）"""
     print("=" * 60)
-    print("快速CPU训练模式（测试用）")
+    print("快速GPU训练模式（支持断点，测试用）")
     print("=" * 60)
+    
+    # 设置命令行参数
+    parser = argparse.ArgumentParser(description='快速GPU训练模式（支持断点）')
+    parser.add_argument('--checkpoint-path', type=str, 
+                       default='checkpoints/gpu_quick_training_checkpoint.pth',
+                       help='断点文件路径')
+    parser.add_argument('--resume', action='store_true',
+                       help='从断点恢复训练')
+    parser.add_argument('--epochs', type=int, default=20,
+                       help='训练轮数')
+    parser.add_argument('--batch-size', type=int, default=32,
+                       help='批量大小')
+    parser.add_argument('--lr', type=float, default=0.001,
+                       help='学习率')
+    
+    args = parser.parse_args()
     
     # 设置日志
     logger = setup_logger(log_level="INFO")
-    logger.info("开始快速CPU训练流程")
+    logger.info("开始快速GPU训练流程（支持断点）")
+    
+    # 检查CUDA可用性
+    if not torch.cuda.is_available():
+        logger.error("CUDA不可用，请检查GPU和CUDA配置")
+        print("错误: CUDA不可用，无法进行GPU训练")
+        return 1
+    
+    device = 'cuda'
+    logger.info(f"使用设备: {device}")
     
     try:
         # 创建演示数据
@@ -223,24 +268,30 @@ def quick_train():
             dropout_rate=0.1
         )
         
-        classifier = ToolWearClassifier(model=model, device='cpu')
+        classifier = ToolWearClassifier(model=model, device=device)
         print(f"   模型参数数量: {sum(p.numel() for p in model.parameters())}")
+        
+        # 确保断点目录存在
+        checkpoint_dir = Path(args.checkpoint_path).parent
+        checkpoint_dir.mkdir(exist_ok=True)
         
         # 快速训练
         print("\n3. 开始快速训练...")
         print(f"   设备: {classifier.device}")
-        print(f"   训练轮数: 10 (快速测试)")
-        print(f"   批量大小: 16")
+        print(f"   训练轮数: {args.epochs}")
+        print(f"   批量大小: {args.batch_size}")
+        print(f"   断点路径: {args.checkpoint_path}")
+        print(f"   从断点恢复: {args.resume}")
         
         history = classifier.train(
             train_data=(X_train, y_train),
             val_data=(X_val, y_val),
-            batch_size=16,  # 小批量
-            num_epochs=10,  # 少量epoch用于测试
-            learning_rate=0.001,
+            batch_size=args.batch_size,
+            num_epochs=args.epochs,
+            learning_rate=args.lr,
             patience=5,
-            checkpoint_path='checkpoints/cpu_quick_training_checkpoint.pth',
-            resume_from_checkpoint=False
+            checkpoint_path=args.checkpoint_path,
+            resume_from_checkpoint=args.resume
         )
         
         print(f"\n   快速训练完成！最佳验证准确率: {classifier.best_val_acc:.4f}")
@@ -255,12 +306,12 @@ def quick_train():
         model_dir = Path(__file__).parent / 'models'
         model_dir.mkdir(exist_ok=True)
         
-        model_path = model_dir / "quick_train_model.pth"
+        model_path = model_dir / "quick_gpu_train_model.pth"
         classifier.save_model(str(model_path))
         print(f"   模型已保存到: {model_path}")
         
         print("\n" + "=" * 60)
-        print("快速CPU训练完成！")
+        print("快速GPU训练完成！")
         print("=" * 60)
         
         return 0
@@ -272,11 +323,13 @@ def quick_train():
 
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='CPU训练脚本')
+    parser = argparse.ArgumentParser(description='GPU训练脚本（支持断点）')
     parser.add_argument('--quick', action='store_true', help='使用快速训练模式（测试用）')
-    parser.add_argument('--verbose', action='store_true', help='显示详细输出')
+    parser.add_argument('--checkpoint-path', type=str, 
+                       default='checkpoints/gpu_training_checkpoint.pth',
+                       help='断点文件路径')
+    parser.add_argument('--resume', action='store_true',
+                       help='从断点恢复训练')
     
     args = parser.parse_args()
     

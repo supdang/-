@@ -306,7 +306,9 @@ class ToolWearClassifier:
               batch_size: int = ModelConfig.BATCH_SIZE,
               num_epochs: int = ModelConfig.NUM_EPOCHS,
               learning_rate: float = ModelConfig.LEARNING_RATE,
-              patience: int = ModelConfig.PATIENCE) -> Dict:
+              patience: int = ModelConfig.PATIENCE,
+              checkpoint_path: Optional[str] = None,
+              resume_from_checkpoint: bool = False) -> Dict:
         """
         训练模型
 
@@ -317,6 +319,8 @@ class ToolWearClassifier:
             num_epochs: 训练轮数
             learning_rate: 学习率
             patience: 早停耐心值
+            checkpoint_path: 断点保存路径
+            resume_from_checkpoint: 是否从断点恢复训练
 
         Returns:
             训练历史字典
@@ -333,11 +337,26 @@ class ToolWearClassifier:
 
         logger.info(f"开始训练，训练样本: {len(train_dataset)}, 验证样本: {len(val_dataset)}")
 
-        # 训练循环
+        # 从断点恢复训练
+        start_epoch = 0
         best_epoch = 0
         no_improve_epochs = 0
 
-        for epoch in range(num_epochs):
+        if resume_from_checkpoint and checkpoint_path and Path(checkpoint_path).exists():
+            logger.info(f"从断点 {checkpoint_path} 恢复训练")
+            start_epoch, best_epoch, no_improve_epochs = self.load_checkpoint(checkpoint_path)
+        
+        # 如果没有从断点恢复，初始化训练状态
+        if start_epoch == 0:
+            best_epoch = 0
+            no_improve_epochs = 0
+
+        total_epochs = num_epochs
+
+        logger.info(f"开始训练，从第 {start_epoch + 1} 轮开始，总共 {total_epochs} 轮")
+
+        # 训练循环
+        for epoch in range(start_epoch, total_epochs):
             # 训练
             train_loss, train_acc = self.train_epoch(train_loader)
 
@@ -357,15 +376,27 @@ class ToolWearClassifier:
             # 保存最佳模型
             if val_acc > self.best_val_acc + ModelConfig.MIN_DELTA:
                 self.best_val_acc = val_acc
-                self.best_model_state = self.model.state_dict().copy()
+                # 创建模型状态的深拷贝以避免后续更新影响最佳模型
+                self.best_model_state = {key: val.clone() for key, val in self.model.state_dict().items()}
                 best_epoch = epoch
                 no_improve_epochs = 0
             else:
                 no_improve_epochs += 1
 
+            # 保存断点（如果指定了断点路径）
+            if checkpoint_path:
+                self.save_checkpoint(
+                    file_path=checkpoint_path,
+                    optimizer_state=self.optimizer.state_dict(),
+                    scheduler_state=self.scheduler.state_dict() if self.scheduler else None,
+                    epoch=epoch,
+                    best_epoch=best_epoch,
+                    no_improve_epochs=no_improve_epochs
+                )
+
             # 打印进度
             if (epoch + 1) % 10 == 0:
-                logger.info(f"Epoch [{epoch + 1}/{num_epochs}] - "
+                logger.info(f"Epoch [{epoch + 1}/{total_epochs}] - "
                             f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
                             f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
@@ -480,6 +511,103 @@ class ToolWearClassifier:
 
         except Exception as e:
             logger.error(f"模型保存失败: {str(e)}")
+            raise
+
+    def save_checkpoint(self, file_path: str, optimizer_state: Optional[dict] = None, 
+                        scheduler_state: Optional[dict] = None, epoch: int = 0, 
+                        best_epoch: int = 0, no_improve_epochs: int = 0):
+        """
+        保存训练断点
+
+        Args:
+            file_path: 断点文件保存路径
+            optimizer_state: 优化器状态
+            scheduler_state: 学习率调度器状态
+            epoch: 当前训练轮数
+            best_epoch: 最佳模型对应的轮数
+            no_improve_epochs: 当前无改善的轮数
+        """
+        try:
+            checkpoint = {
+                'model_state_dict': self.model.state_dict(),
+                'model_config': {
+                    'input_size': self.model.input_size,
+                    'hidden_size': self.model.hidden_size,
+                    'num_layers': self.model.num_layers,
+                    'num_classes': self.model.num_classes,
+                    'dropout_rate': self.model.dropout_rate
+                },
+                'train_history': self.train_history,
+                'best_val_acc': self.best_val_acc,
+                'best_model_state': self.best_model_state,
+                'optimizer_state_dict': optimizer_state,
+                'scheduler_state_dict': scheduler_state,
+                'epoch': epoch,
+                'best_epoch': best_epoch,
+                'no_improve_epochs': no_improve_epochs,
+                'device': str(self.device)
+            }
+
+            torch.save(checkpoint, file_path)
+            logger.info(f"训练断点已保存到: {file_path}")
+
+        except Exception as e:
+            logger.error(f"断点保存失败: {str(e)}")
+            raise
+
+    def load_checkpoint(self, file_path: str):
+        """
+        加载训练断点
+
+        Args:
+            file_path: 断点文件路径
+        """
+        try:
+            checkpoint = torch.load(file_path, map_location=self.device)
+
+            # 重建模型（如果需要）
+            if 'model_config' in checkpoint:
+                config = checkpoint['model_config']
+                if (self.model.input_size != config['input_size'] or 
+                    self.model.hidden_size != config['hidden_size'] or
+                    self.model.num_layers != config['num_layers'] or
+                    self.model.num_classes != config['num_classes'] or
+                    self.model.dropout_rate != config['dropout_rate']):
+                    self.model = LSTMToolWearModel(**config)
+                    self.model.to(self.device)
+
+            # 加载模型权重
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+
+            # 加载训练历史
+            if 'train_history' in checkpoint:
+                self.train_history = checkpoint['train_history']
+
+            if 'best_val_acc' in checkpoint:
+                self.best_val_acc = checkpoint['best_val_acc']
+
+            if 'best_model_state' in checkpoint:
+                self.best_model_state = checkpoint['best_model_state']
+
+            # 加载优化器状态（如果存在）
+            if self.optimizer is not None and 'optimizer_state_dict' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            # 加载调度器状态（如果存在）
+            if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+            # 返回训练状态信息
+            epoch = checkpoint.get('epoch', 0)
+            best_epoch = checkpoint.get('best_epoch', 0)
+            no_improve_epochs = checkpoint.get('no_improve_epochs', 0)
+
+            logger.info(f"训练断点已从 {file_path} 加载，当前轮数: {epoch}, 最佳轮数: {best_epoch}")
+
+            return epoch, best_epoch, no_improve_epochs
+
+        except Exception as e:
+            logger.error(f"断点加载失败: {str(e)}")
             raise
 
     def load_model(self, file_path: str):
