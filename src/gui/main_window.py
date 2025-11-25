@@ -167,10 +167,16 @@ class TrainingWorker(QThread):
                     break
 
                 val_loss, val_acc = self._validate(val_loader)
+                
+                # 检查是否需要停止（在验证后检查）
+                if not self._is_running:
+                    logger.info("训练被用户中断")
+                    break
 
                 # 每个epoch后清理缓存
                 if 'cuda' in device_type:
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()  # 确保GPU操作完成
 
                 # 发送进度信号
                 self.progress_updated.emit(
@@ -239,6 +245,11 @@ class TrainingWorker(QThread):
         total_batches = len(train_loader)  # 先计算总batch数
 
         for batch_idx, (data, target) in enumerate(train_loader):
+            # 检查是否需要停止
+            if not self._is_running:
+                logger.info("训练epoch被用户中断")
+                break
+
             # 检查显存使用情况
             if 'cuda' in str(self.classifier.device):
                 try:
@@ -266,6 +277,11 @@ class TrainingWorker(QThread):
                     logger.warning(f"训练过程中的显存监控失败: {str(e)}")
 
             data, target = data.to(self.classifier.device), target.to(self.classifier.device)
+
+            # 再次检查是否需要停止（在数据传输后）
+            if not self._is_running:
+                logger.info("训练epoch被用户中断")
+                break
 
             self.classifier.optimizer.zero_grad()
             output = self.classifier.model(data)
@@ -295,6 +311,11 @@ class TrainingWorker(QThread):
             # GPU清理缓存
             if batch_idx % 4 == 0 and 'cuda' in str(self.classifier.device):
                 torch.cuda.empty_cache()
+                
+                # 检查是否需要停止（在清理缓存后）
+                if not self._is_running:
+                    logger.info("训练epoch被用户中断")
+                    break
 
         avg_loss = total_loss / len(train_loader)
         avg_acc = total_correct / total_samples
@@ -309,6 +330,11 @@ class TrainingWorker(QThread):
 
         with torch.no_grad():
             for batch_idx, (data, target) in enumerate(val_loader):
+                # 检查是否需要停止
+                if not self._is_running:
+                    logger.info("验证被用户中断")
+                    break
+                
                 # 检查显存使用情况
                 if 'cuda' in str(self.classifier.device):
                     try:
@@ -330,6 +356,11 @@ class TrainingWorker(QThread):
 
                 data, target = data.to(self.classifier.device), target.to(self.classifier.device)
 
+                # 再次检查是否需要停止（在数据传输后）
+                if not self._is_running:
+                    logger.info("验证被用户中断")
+                    break
+
                 output = self.classifier.model(data)
                 loss = self.classifier.criterion(output, target)
 
@@ -341,6 +372,11 @@ class TrainingWorker(QThread):
                 # GPU清理缓存
                 if batch_idx % 2 == 0 and 'cuda' in str(self.classifier.device):
                     torch.cuda.empty_cache()
+                    
+                    # 检查是否需要停止（在清理缓存后）
+                    if not self._is_running:
+                        logger.info("验证被用户中断")
+                        break
 
         avg_loss = total_loss / len(val_loader)
         avg_acc = total_correct / total_samples
@@ -352,9 +388,11 @@ class TrainingWorker(QThread):
         self._is_running = False
         # 停止时清理内存
         if 'cuda' in str(self.classifier.device):
-            torch.cuda.empty_cache()
-            # 同步GPU以确保清理完成
-            torch.cuda.synchronize()
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # 同步GPU以确保清理完成
+            except Exception as e:
+                logger.error(f"停止时清理GPU缓存失败: {str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -1328,14 +1366,29 @@ class MainWindow(QMainWindow):
         if self.training_worker and self.training_worker.isRunning():
             # 停止训练工作线程
             self.training_worker.stop()
-            # 等待线程结束，最多等待10秒
-            if not self.training_worker.wait(10000):  # 10秒超时
-                logger.warning("训练线程未能在10秒内停止，尝试强制终止")
-                # 强制终止线程（如果wait失败）
+            
+            # 先尝试正常等待线程结束
+            if self.training_worker.wait(2000):  # 先等待2秒
+                logger.info("训练线程已正常停止")
+            else:
+                # 如果线程没有正常停止，尝试中断线程
                 try:
-                    self.training_worker.terminate()
-                except:
-                    pass  # 如果terminate不可用，则忽略
+                    # 不再使用terminate()，而是确保停止信号已处理
+                    if self.training_worker.isRunning():
+                        logger.warning("训练线程仍在运行，等待清理资源...")
+                        # 继续等待直到线程结束，最多等待8秒
+                        remaining_time = 8000
+                        while self.training_worker.isRunning() and remaining_time > 0:
+                            import time
+                            time.sleep(0.1)  # 短暂休眠
+                            remaining_time -= 100
+                            
+                        if self.training_worker.isRunning():
+                            logger.warning("训练线程未能正常停止")
+                        else:
+                            logger.info("训练线程已停止")
+                except Exception as e:
+                    logger.error(f"停止训练线程时出错: {str(e)}")
 
         # 清理GPU内存
         if hasattr(self, 'classifier') and self.classifier is not None:
@@ -1343,8 +1396,8 @@ class MainWindow(QMainWindow):
                 try:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                except:
-                    pass  # 如果GPU清理失败，则忽略
+                except Exception as e:
+                    logger.error(f"清理GPU缓存时出错: {str(e)}")
 
         self.train_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
